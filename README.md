@@ -4,6 +4,7 @@ Small tools for the workbench Postgres databases.
 
 - `table_counts.py`: every table with its row count.
 - `export_to_s3.py`: every table exported to S3 as Parquet and CSV.
+- `schema_dump.py`: the schema of each database written to `schema/<db>.md`.
 
 ## Setup
 
@@ -18,6 +19,19 @@ cp .env.example .env   # then fill in the credentials and S3_ROOT
 python table_counts.py              # databases listed in DB_NAMES
 python table_counts.py db_a db_b    # or name them on the command line
 ```
+
+## Schema
+
+```
+python schema_dump.py                       # databases in DB_NAMES -> schema/<db>.md
+python schema_dump.py --samples 0           # without sample rows
+python schema_dump.py --find vendor,parent  # other words to search for
+```
+
+Per table: row count, columns (type, nullable, default, comment), primary key, foreign keys both ways,
+unique / check rules, the keys found inside JSON columns, and 3 sample rows. At the top: every column or
+JSON key whose name contains vendor, parent, child, source, external, ref, original, link or master.
+`schema/` is git-ignored: the sample rows hold real data, including names.
 
 ## Export to S3
 
