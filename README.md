@@ -5,7 +5,7 @@ Small tools for the workbench Postgres databases.
 - `table_counts.py`: every table with its row count.
 - `export_to_s3.py`: every table exported to S3 as Parquet and CSV.
 - `schema_dump.py`: the schema of each database written to `schema/<db>.md`.
-- `defect_breakup.py`: workbench defects split into parent and child, with each vendor defect id.
+- `defect_breakup.py`: workbench defects split into parent and child, with each vendor defect id, saved to S3.
 
 ## Setup
 
@@ -37,8 +37,18 @@ JSON key whose name contains vendor, parent, child, source, external, ref, origi
 ## Defect breakup (parent / child / vendor defect id)
 
 ```
-python defect_breakup.py            # databases in DB_NAMES -> defect_breakup/<db>.csv
+python defect_breakup.py              # databases in DB_NAMES -> S3
+python defect_breakup.py --local out  # to a local folder instead (to test)
 ```
+
+Saved to S3 like the tables, as `defect_breakup.parquet` / `.csv`:
+
+```
+workbench/year=2026/month=11/day=26/<database>/defect_breakup.parquet   (+ .csv)
+workbench/latest/<database>/defect_breakup.parquet                      (+ .csv)
+```
+
+`export_to_s3.py` writes the same file with every export, so running the export is enough.
 
 One row per vendor defect. How the workbench stores defects:
 
@@ -53,7 +63,7 @@ One row per vendor defect. How the workbench stores defects:
 Columns: parent_defect_id, parent_kind, child_count, child_position, child_is_middle, child_id,
 vendor_defect_id, vendor_id_from, vendor, survey_id, upc, survey week/date, defect type, category, severity,
 status, side, road part, lane, chainages, lat/lon, confidence, first detected date, the parent's type and
-chainages, image url, reviewer, pushed at. A summary is printed on screen. `defect_breakup/` is git-ignored.
+chainages, image url, reviewer, pushed at. A summary is printed on screen.
 
 ## Export to S3
 

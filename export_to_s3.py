@@ -4,6 +4,8 @@ Layout under S3_ROOT (from .env):
     <S3_ROOT>/workbench/year=2026/month=11/day=26/<database>/<schema>.<table>.parquet  (+ .csv)
     <S3_ROOT>/workbench/latest/<database>/<schema>.<table>.parquet                     (+ .csv)
 
+Next to the tables: defect_breakup.parquet / .csv (see defect_breakup.py).
+
 The dated folder is written first. Only when every table of a database exported fine is that database's
 latest/ folder replaced by a copy of it, so latest/ always holds one complete export.
 
@@ -29,6 +31,7 @@ import pyarrow.parquet as pq
 from dotenv import load_dotenv
 from psycopg2 import sql
 
+from defect_breakup import read_breakup
 from table_counts import connect, db_names, list_tables
 
 load_dotenv()
@@ -133,6 +136,25 @@ class LocalTarget:
         return self.path(*parts)
 
 
+def make_target(local=None):
+    """LocalTarget(local) when given, else S3Target(S3_ROOT from .env)."""
+    if local:
+        return LocalTarget(local)
+    root = os.getenv("S3_ROOT", "").strip()
+    if not root:
+        sys.exit("Set S3_ROOT in .env (e.g. s3://my-bucket/some/prefix) or use --local <folder>.")
+    return S3Target(root)
+
+
+def dated_folder(day=None):
+    """('workbench', 'year=…', 'month=…', 'day=…') for YYYY-MM-DD, default today (UTC)."""
+    d = date.fromisoformat(day) if day else datetime.now(timezone.utc).date()
+    return "workbench", f"year={d.year}", f"month={d.month:02d}", f"day={d.day:02d}"
+
+
+LATEST = ("workbench", "latest")
+
+
 # ── main ─────────────────────────────────────────────────────────────────────────────────────────────────
 def export_db(dbname, target, day_parts):
     """Exports one database; returns (rows of the summary, ok)."""
@@ -146,6 +168,21 @@ def export_db(dbname, target, day_parts):
                 name = f"{schema}.{table}"
                 try:
                     df = read_table(conn, schema, table)
+                    for f in write_files(df, tmp, name):
+                        target.upload(os.path.join(tmp, f), *day_parts, dbname, f)
+                        os.remove(os.path.join(tmp, f))
+                    summary.append((name, len(df), "ok"))
+                    print(f"  {name:50s} {len(df):>12,} rows")
+                except Exception as e:
+                    conn.rollback()
+                    ok = False
+                    summary.append((name, None, f"FAILED: {type(e).__name__}: {e}".splitlines()[0]))
+                    print(f"  {name:50s} FAILED: {type(e).__name__}: {str(e).splitlines()[0]}")
+            # parent / child / vendor id breakup of the workbench defects, next to the tables
+            if {("public", "workbench_defects"), ("public", "workbench_defect_children")} <= set(tables):
+                name = "defect_breakup"
+                try:
+                    df = read_breakup(conn)
                     for f in write_files(df, tmp, name):
                         target.upload(os.path.join(tmp, f), *day_parts, dbname, f)
                         os.remove(os.path.join(tmp, f))
@@ -171,15 +208,8 @@ def main():
     dbs = db_names(a.databases)
     if not dbs:
         sys.exit("No databases given. Set DB_NAMES in .env or pass names as arguments.")
-    d = date.fromisoformat(a.date) if a.date else datetime.now(timezone.utc).date()
-    if a.local:
-        target = LocalTarget(a.local)
-    else:
-        root = os.getenv("S3_ROOT", "").strip()
-        if not root:
-            sys.exit("Set S3_ROOT in .env (e.g. s3://my-bucket/some/prefix) or use --local <folder>.")
-        target = S3Target(root)
-    day_parts = ("workbench", f"year={d.year}", f"month={d.month:02d}", f"day={d.day:02d}")
+    target = make_target(a.local)
+    day_parts = dated_folder(a.date)
     print(f"Formats {', '.join(FORMATS)} | dated folder {target.show(*day_parts)}")
 
     failed = []
@@ -195,7 +225,7 @@ def main():
             print("  (no tables)")
             continue
         if ok:
-            target.replace_folder((*day_parts, db), ("workbench", "latest", db))
+            target.replace_folder((*day_parts, db), (*LATEST, db))
             print(f"  latest updated: {target.show('workbench', 'latest', db)}")
         else:
             failed.append(db)

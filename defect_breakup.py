@@ -10,15 +10,18 @@ A parent is either
             the "_<survey id>" ending
 The vendor name comes from workbench_runs (run_id = <upc>__W<survey week>).
 
-Output: one row per vendor defect -> defect_breakup/<db>.csv, plus a summary on screen.
+Output: one row per vendor defect, as defect_breakup.parquet / .csv in S3 (S3_ROOT in .env):
+    <S3_ROOT>/workbench/year=…/month=…/day=…/<db>/defect_breakup.parquet  (+ .csv)
+    <S3_ROOT>/workbench/latest/<db>/defect_breakup.parquet               (+ .csv)
+plus a summary on screen. export_to_s3.py writes the same file with every export.
 
 Usage:
     python defect_breakup.py              # databases in DB_NAMES
     python defect_breakup.py db_a         # one database
+    python defect_breakup.py --local out  # write to a local folder instead of S3 (to test)
 """
 
 import argparse
-import csv
 import os
 
 from table_counts import connect, db_names
@@ -84,63 +87,67 @@ ORDER BY r.parent_defect_id, r.child_position NULLS FIRST, r.child_id
 """
 
 
+def read_breakup(conn):
+    """The breakup as a DataFrame (one row per vendor defect)."""
+    import pandas as pd
+    with conn.cursor() as cur:
+        cur.execute(QUERY)
+        return pd.DataFrame(cur.fetchall(), columns=[d[0] for d in cur.description])
+
+
+def print_summary(df):
+    parents = df.drop_duplicates("parent_defect_id")
+    print(f"  parents: {len(parents):,}")
+    for kind, n in parents["parent_kind"].value_counts().sort_index().items():
+        print(f"    {kind:24s} {n:,}")
+    src = df["vendor_id_from"].value_counts()
+    print(f"  rows (one per vendor defect): {len(df):,}")
+    print(f"    vendor id from child      {src.get('child vendor_defect_id', 0):,}")
+    print(f"    vendor id from parent id  {src.get('parent defect_id', 0):,}")
+    print(f"    vendor id not found       {src.get('not found', 0):,}")
+    print(f"    vendor name not found     {int(df['vendor'].isna().sum()):,}")
+    sizes = parents.loc[parents["child_count"] > 0, "child_count"].value_counts().sort_index()
+    if len(sizes):
+        print("  children per grouped parent: " +
+              ", ".join(f"{n} child{'ren' if n > 1 else ''}: {c:,}" for n, c in sizes.items()))
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Workbench defects by parent / child with vendor defect ids")
+    import tempfile
+    from export_to_s3 import FORMATS, LATEST, dated_folder, make_target, write_files
+
+    ap = argparse.ArgumentParser(description="Workbench defects by parent / child with vendor defect ids -> S3")
     ap.add_argument("databases", nargs="*", help="Database names (default: DB_NAMES in .env)")
-    ap.add_argument("--out", default="defect_breakup", help="Output folder (default defect_breakup/)")
+    ap.add_argument("--date", help="Folder date YYYY-MM-DD (default: today, UTC)")
+    ap.add_argument("--local", help="Write into this local folder instead of S3_ROOT (for testing)")
     a = ap.parse_args()
 
     dbs = db_names(a.databases)
     if not dbs:
         raise SystemExit("No databases given. Set DB_NAMES in .env or pass names as arguments.")
-    os.makedirs(a.out, exist_ok=True)
+    target = make_target(a.local)
+    day_parts = dated_folder(a.date)
+    failed = []
     for db in dbs:
         print(f"\n=== {db} ===")
         conn = connect(db)
         try:
             conn.set_session(readonly=True)
-            with conn.cursor() as cur:
-                cur.execute(QUERY)
-                cols = [d[0] for d in cur.description]
-                rows = cur.fetchall()
+            df = read_breakup(conn)
         except Exception as e:
             print(f"  ERROR: {type(e).__name__}: {str(e).splitlines()[0]}")
+            failed.append(db)
             continue
         finally:
             conn.close()
-
-        path = os.path.join(a.out, f"{db}.csv")
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(cols)
-            w.writerows(rows)
-
-        i = {c: n for n, c in enumerate(cols)}
-        parents = {}
-        for r in rows:
-            parents.setdefault(r[i["parent_defect_id"]], (r[i["parent_kind"]], r[i["child_count"]]))
-        kinds = {}
-        for kind, _ in parents.values():
-            kinds[kind] = kinds.get(kind, 0) + 1
-        sizes = {}
-        for kind, n in parents.values():
-            if n:
-                sizes[n] = sizes.get(n, 0) + 1
-        no_vendor = sum(1 for r in rows if r[i["vendor_id_from"]] == "not found")
-        no_vendor_name = sum(1 for r in rows if not r[i["vendor"]])
-
-        print(f"  parents: {len(parents):,}")
-        for k, n in sorted(kinds.items()):
-            print(f"    {k:24s} {n:,}")
-        print(f"  rows (one per vendor defect): {len(rows):,}")
-        print(f"    vendor id from child      {sum(1 for r in rows if r[i['vendor_id_from']] == 'child vendor_defect_id'):,}")
-        print(f"    vendor id from parent id  {sum(1 for r in rows if r[i['vendor_id_from']] == 'parent defect_id'):,}")
-        print(f"    vendor id not found       {no_vendor:,}")
-        print(f"    vendor name not found     {no_vendor_name:,}")
-        if sizes:
-            print("  children per grouped parent: " +
-                  ", ".join(f"{n} child{'ren' if n > 1 else ''}: {c:,}" for n, c in sorted(sizes.items())))
-        print(f"  -> {path}")
+        print_summary(df)
+        with tempfile.TemporaryDirectory() as tmp:
+            for f in write_files(df, tmp, "defect_breakup"):
+                for parts in (day_parts, LATEST):
+                    target.upload(os.path.join(tmp, f), *parts, db, f)
+                    print(f"  -> {target.show(*parts, db, f)}")
+    if failed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
