@@ -22,18 +22,32 @@ TABLES_QUERY = """
 """
 
 
-def count_tables(dbname):
-    conn = psycopg2.connect(
+def connect(dbname):
+    return psycopg2.connect(
         host=os.getenv("DB_HOST"),
         port=os.getenv("DB_PORT", "5432"),
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD"),
         dbname=dbname,
     )
+
+
+def db_names(args):
+    """Databases from the command line, else DB_NAMES in .env."""
+    return args or [d.strip() for d in os.getenv("DB_NAMES", "").split(",") if d.strip()]
+
+
+def list_tables(conn):
+    with conn.cursor() as cur:
+        cur.execute(TABLES_QUERY)
+        return cur.fetchall()
+
+
+def count_tables(dbname):
+    conn = connect(dbname)
     try:
+        tables = list_tables(conn)
         with conn.cursor() as cur:
-            cur.execute(TABLES_QUERY)
-            tables = cur.fetchall()
             rows = []
             for schema, table in tables:
                 cur.execute(
@@ -48,9 +62,7 @@ def count_tables(dbname):
 
 
 def main():
-    dbnames = sys.argv[1:] or [
-        d.strip() for d in os.getenv("DB_NAMES", "").split(",") if d.strip()
-    ]
+    dbnames = db_names(sys.argv[1:])
     if not dbnames:
         sys.exit("No databases given. Set DB_NAMES in .env or pass names as arguments.")
 
